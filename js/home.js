@@ -180,7 +180,7 @@ function renderItems() {
     });
 
     // 2. Reset slots
-    const slots = document.querySelectorAll('.grid-slot');
+    const slots = pagesWrapper.querySelectorAll('.grid-slot');
     slots.forEach(slot => {
         // Remove delete buttons only
         const delBtn = slot.querySelector('.delete-btn');
@@ -194,7 +194,7 @@ function renderItems() {
     });
 
     // 3. Edit mode styles
-    const grids = document.querySelectorAll('.home-screen-grid');
+    const grids = pagesWrapper.querySelectorAll('.home-screen-grid');
     grids.forEach(grid => {
         if (isEditMode) grid.classList.add('edit-mode');
         else grid.classList.remove('edit-mode');
@@ -263,6 +263,14 @@ function renderItems() {
                 el.addEventListener('touchstart', (e) => handleItemTouchStart(e, item), { passive: false });
                 el.addEventListener('touchmove', handleItemTouchMove, { passive: false });
                 el.addEventListener('touchend', (e) => handleItemTouchEnd(e, item), { passive: false });
+            }
+
+            // Fix: 更新 pointer-events，确保退出编辑模式后组件可交互
+            if (item.type === 'custom-json-widget') {
+                const content = el.firstChild;
+                if (content) {
+                    content.style.pointerEvents = isEditMode ? 'none' : 'auto';
+                }
             }
 
             if (item.type === 'dom-element' || item.type === 'custom-json-widget') {
@@ -362,8 +370,13 @@ function createAppElement(item, draggable) {
     
     div.addEventListener('click', (e) => {
         if (!isEditMode && item.appId) {
-            const appScreen = document.getElementById(item.appId);
-            if (appScreen) appScreen.classList.remove('hidden');
+            // 调用全局 app click 处理函数 (如果有)
+            if (window.handleAppClick) {
+                window.handleAppClick(item.appId, item.name);
+            } else {
+                const appScreen = document.getElementById(item.appId);
+                if (appScreen) appScreen.classList.remove('hidden');
+            }
         }
     });
     
@@ -658,7 +671,7 @@ function handleDragEnd(e, item) {
         currentDraggedItem = null;
     }
     lastDragTargetIndex = -1;
-    document.querySelectorAll('.grid-slot').forEach(s => s.classList.remove('drag-preview'));
+    pagesWrapper.querySelectorAll('.grid-slot').forEach(s => s.classList.remove('drag-preview'));
     
     if (pageSwitchTimer) {
         clearTimeout(pageSwitchTimer);
@@ -1251,3 +1264,8 @@ if (window.appInitFunctions) {
 
 window.initGrid = initGrid;
 window.renderItems = renderItems;
+window.createCustomJsonWidget = createCustomJsonWidget;
+window.createAppElement = createAppElement;
+window.getOccupiedSlots = getOccupiedSlots;
+window.isCollision = isCollision;
+window.applyWidgetSize = applyWidgetSize;
