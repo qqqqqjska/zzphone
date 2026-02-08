@@ -79,6 +79,9 @@ window.showChatNotification = function(contactId, content) {
     else if (content.startsWith('[表情包]') || content.startsWith('<img') && content.includes('sticker')) previewText = '[表情包]';
     else if (content.startsWith('[语音]')) previewText = '[语音]';
     else if (content.startsWith('[转账]')) previewText = '[转账]';
+    else if (content.includes('pay_request')) previewText = '[代付请求]';
+    else if (content.includes('shopping_gift')) previewText = '[礼物]';
+    else if (content.includes('delivery_share')) previewText = '[外卖]';
     
     // 如果内容包含HTML标签（如图片），尝试提取文本或显示类型
     if (previewText.includes('<') && previewText.includes('>')) {
@@ -101,6 +104,30 @@ window.showChatNotification = function(contactId, content) {
         banner.classList.add('hidden');
         currentNotificationTimeout = null;
     }, 3000);
+
+    // 尝试发送系统通知
+    sendSystemNotification(contact, previewText);
+};
+
+window.sendSystemNotification = function(contact, content) {
+    if (window.iphoneSimState.enableSystemNotifications && "Notification" in window && Notification.permission === "granted") {
+        try {
+            const displayName = contact.remark || contact.nickname || contact.name;
+            const n = new Notification(displayName, {
+                body: content,
+                icon: contact.avatar,
+                tag: 'chat-msg-' + contact.id
+            });
+            n.onclick = function() {
+                window.focus();
+                this.close();
+                // 模拟点击应用内通知的行为
+                window.handleNotificationClick(); 
+            };
+        } catch(e) {
+            console.error('System notification failed', e);
+        }
+    }
 };
 
 window.handleNotificationClick = function(e) {
@@ -147,6 +174,8 @@ function handleSaveContact() {
         persona,
         style: '正常',
         avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + name,
+        activeReplyEnabled: false,
+        activeReplyInterval: 60,
         autoItineraryEnabled: false,
         autoItineraryInterval: 10,
         messagesSinceLastItinerary: 0,
@@ -276,7 +305,7 @@ function renderContactList(filterGroup = 'all') {
             const history = window.iphoneSimState.chatHistory[contact.id];
             if (history && history.length > 0) {
                 const lastMsg = history[history.length - 1];
-                if (lastMsg.type === 'text') {
+            if (lastMsg.type === 'text') {
                     lastMsgText = lastMsg.content;
                 } else if (lastMsg.type === 'image') {
                     lastMsgText = '[图片]';
@@ -288,6 +317,10 @@ function renderContactList(filterGroup = 'all') {
                     lastMsgText = '[语音]';
                 } else if (lastMsg.type === 'gift_card') {
                     lastMsgText = '[礼物]';
+                } else if (lastMsg.type === 'shopping_gift') {
+                    lastMsgText = '[礼物]';
+                } else if (lastMsg.type === 'pay_request') {
+                    lastMsgText = '[代付请求]';
                 } else if (lastMsg.type === 'voice_call_text') {
                     lastMsgText = '[通话]';
                 }
@@ -674,6 +707,10 @@ function openChatSettings() {
     // 消息间隔设置
     document.getElementById('chat-setting-interval-min').value = contact.replyIntervalMin || '';
     document.getElementById('chat-setting-interval-max').value = contact.replyIntervalMax || '';
+
+    // 主动发消息设置
+    document.getElementById('chat-setting-active-reply').checked = contact.activeReplyEnabled || false;
+    document.getElementById('chat-setting-active-interval').value = contact.activeReplyInterval || '';
 
     // 字体大小设置
     const fontSizeSlider = document.getElementById('chat-font-size-slider');
@@ -1206,6 +1243,8 @@ function handleSaveChatSettings() {
     const fontSize = document.getElementById('chat-font-size-slider') ? parseInt(document.getElementById('chat-font-size-slider').value) : 16;
     const intervalMin = document.getElementById('chat-setting-interval-min').value;
     const intervalMax = document.getElementById('chat-setting-interval-max').value;
+    const activeReplyEnabled = document.getElementById('chat-setting-active-reply').checked;
+    const activeReplyInterval = document.getElementById('chat-setting-active-interval').value;
 
     const selectedWbCategories = [];
     document.querySelectorAll('.wb-category-checkbox').forEach(cb => {
@@ -1242,6 +1281,22 @@ function handleSaveChatSettings() {
     contact.chatFontSize = fontSize;
     contact.replyIntervalMin = intervalMin ? parseInt(intervalMin) : null;
     contact.replyIntervalMax = intervalMax ? parseInt(intervalMax) : null;
+    contact.activeReplyEnabled = activeReplyEnabled;
+    contact.activeReplyInterval = activeReplyInterval ? parseInt(activeReplyInterval) : 60;
+    
+    if (activeReplyEnabled) {
+        // Start timing from now (or keep existing start time if already enabled?)
+        // Requirement: "Change to timing from the last message sent AFTER enabling".
+        // To strictly enforce "after enabling", we set the start time now.
+        // If it was already enabled, maybe we shouldn't reset it? 
+        // But if the user enters settings and clicks save, they might expect a refresh.
+        // Let's set it if it wasn't enabled before, or if we want to reset.
+        // For simplicity and to ensure the "after enabling" rule holds even on re-save:
+        contact.activeReplyStartTime = Date.now();
+    } else {
+        contact.activeReplyStartTime = null;
+    }
+
     document.getElementById('chat-title').textContent = remark || contact.name;
     
     contact.chatBg = window.iphoneSimState.tempSelectedChatBg;
@@ -1458,11 +1513,12 @@ function updateThoughtBubble(text) {
     }
 }
 
-function sendMessage(text, isUser, type = 'text', description = null) {
-    if (!window.iphoneSimState.currentChatContactId) return;
+function sendMessage(text, isUser, type = 'text', description = null, targetContactId = null) {
+    const contactId = targetContactId || window.iphoneSimState.currentChatContactId;
+    if (!contactId) return;
     
-    if (!window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId]) {
-        window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId] = [];
+    if (!window.iphoneSimState.chatHistory[contactId]) {
+        window.iphoneSimState.chatHistory[contactId] = [];
     }
     
     const msg = {
@@ -1471,7 +1527,7 @@ function sendMessage(text, isUser, type = 'text', description = null) {
         role: isUser ? 'user' : 'assistant',
         content: text,
         type: type,
-        replyTo: window.iphoneSimState.replyingToMsg ? {
+        replyTo: (window.iphoneSimState.replyingToMsg && (!targetContactId || targetContactId === window.iphoneSimState.currentChatContactId)) ? {
             name: window.iphoneSimState.replyingToMsg.name,
             content: window.iphoneSimState.replyingToMsg.type === 'text' ? window.iphoneSimState.replyingToMsg.content : `[${window.iphoneSimState.replyingToMsg.type === 'sticker' ? '表情包' : '图片'}]`
         } : null
@@ -1481,11 +1537,11 @@ function sendMessage(text, isUser, type = 'text', description = null) {
         msg.description = description;
     }
     
-    window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId].push(msg);
+    window.iphoneSimState.chatHistory[contactId].push(msg);
     
-    if (window.iphoneSimState.replyingToMsg) cancelQuote();
+    if (window.iphoneSimState.replyingToMsg && (!targetContactId || targetContactId === window.iphoneSimState.currentChatContactId)) cancelQuote();
     
-    const contact = window.iphoneSimState.contacts.find(c => c.id === window.iphoneSimState.currentChatContactId);
+    const contact = window.iphoneSimState.contacts.find(c => c.id === contactId);
     if (contact) {
         if (contact.autoItineraryEnabled) {
             if (typeof contact.messagesSinceLastItinerary !== 'number') {
@@ -1506,12 +1562,15 @@ function sendMessage(text, isUser, type = 'text', description = null) {
 
     saveConfig();
     
-    appendMessageToUI(text, isUser, type, description, msg.replyTo, msg.id, msg.time);
-    scrollToBottom();
+    // Only update UI if we are in the chat with this contact
+    if (window.iphoneSimState.currentChatContactId === contactId) {
+        appendMessageToUI(text, isUser, type, description, msg.replyTo, msg.id, msg.time);
+        scrollToBottom();
+    }
 
     if (window.renderContactList) window.renderContactList(window.iphoneSimState.currentContactGroup || 'all');
 
-    if (window.checkAndSummarize) window.checkAndSummarize(window.iphoneSimState.currentChatContactId);
+    if (window.checkAndSummarize) window.checkAndSummarize(contactId);
 }
 
 function appendMessageToUI(text, isUser, type = 'text', description = null, replyTo = null, msgId = null, timestamp = null, isHistory = false) {
@@ -1746,6 +1805,183 @@ function appendMessageToUI(text, isUser, type = 'text', description = null, repl
                 <div style="border-top: 1px solid #f0f0f0; padding-top: 8px; font-size: 12px; color: #666; display: flex; align-items: center;">
                     <i class="fas fa-heart" style="color: #FF3B30; margin-right: 5px;"></i> 
                     <span>闲鱼收藏礼物</span>
+                </div>
+            </div>
+        `;
+    } else if (type === 'shopping_gift') {
+        extraClass = 'shopping-gift-msg';
+        let giftData = {};
+        try {
+            giftData = typeof text === 'string' ? JSON.parse(text) : text;
+        } catch(e) {}
+        
+        const itemCount = giftData.items ? giftData.items.length : 0;
+        const firstItem = itemCount > 0 ? giftData.items[0] : { title: '礼物', image: '' };
+        const total = giftData.total || '0.00';
+        const remarkHtml = giftData.remark ? `<div style="padding: 6px 12px; font-size: 13px; color: #333; background: #fff; border-top: 1px solid #f5f5f5; font-style: italic;">"${giftData.remark}"</div>` : '';
+        
+        contentHtml = `
+            <div class="shopping-gift-card" style="background: #fff; border-radius: 12px; overflow: hidden; width: 230px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: -40px; display: flex; flex-direction: column;">
+                <div style="background: #333333; padding: 8px 12px; color: #fff; font-size: 14px; font-weight: bold; display: flex; align-items: center; justify-content: space-between;">
+                    <span><i class="fas fa-gift" style="margin-right: 6px;"></i>送你的礼物</span>
+                    <span style="font-size: 16px;">¥${total}</span>
+                </div>
+                <div style="padding: 5px 10px 2px 10px; display: flex; gap: 10px;">
+                    <div style="width: 60px; height: 60px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background-color: #f0f0f0;">
+                        <img src="${firstItem.image || ''}" style="width: 100%; height: 100%; object-fit: cover;">
+                    </div>
+                    <div style="flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: center;">
+                        <div style="font-size: 13px; color: #333; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">${firstItem.title}</div>
+                        ${firstItem.selectedSpec ? `<div style="font-size: 11px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${firstItem.selectedSpec}</div>` : ''}
+                        ${itemCount > 1 ? `<div style="font-size: 12px; color: #999; margin-top: 4px;">等 ${itemCount} 件商品</div>` : ''}
+                    </div>
+                </div>
+                ${remarkHtml}
+                <div style="padding: 2px 12px; border-top: 1px solid #f5f5f5; text-align: right; line-height: 1;">
+                     <span style="font-size: 12px; color: #999;">已发送</span>
+                </div>
+            </div>
+        `;
+    } else if (type === 'delivery_share') {
+        extraClass = 'delivery-share-msg';
+        let deliveryData = {};
+        try {
+            deliveryData = typeof text === 'string' ? JSON.parse(text) : text;
+        } catch(e) {}
+        
+        const itemCount = deliveryData.items ? deliveryData.items.length : 0;
+        const firstItem = itemCount > 0 ? deliveryData.items[0] : { title: '美食', image: '' };
+        const total = deliveryData.total || '0.00';
+        const remarkHtml = deliveryData.remark ? `<div style="padding: 6px 12px; font-size: 13px; color: #333; background: #fff; border-top: 1px solid #f5f5f5; font-style: italic;">"${deliveryData.remark}"</div>` : '';
+        
+        contentHtml = `
+            <div class="delivery-share-card" style="background: #fff; border-radius: 12px; overflow: hidden; width: 230px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: -40px; display: flex; flex-direction: column;">
+                <div style="background: #333333; padding: 8px 12px; color: #fff; font-size: 14px; font-weight: bold; display: flex; align-items: center; justify-content: space-between;">
+                    <span><i class="fas fa-utensils" style="margin-right: 6px;"></i>请你吃外卖</span>
+                    <span style="font-size: 16px;">¥${total}</span>
+                </div>
+                <div style="padding: 5px 10px 2px 10px; display: flex; gap: 10px;">
+                    <div style="width: 60px; height: 60px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background-color: #f0f0f0;">
+                        <img src="${firstItem.image || ''}" style="width: 100%; height: 100%; object-fit: cover;">
+                    </div>
+                    <div style="flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: center;">
+                        <div style="font-size: 13px; color: #333; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">${firstItem.title}</div>
+                        ${firstItem.selectedSpec ? `<div style="font-size: 11px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${firstItem.selectedSpec}</div>` : ''}
+                        ${itemCount > 1 ? `<div style="font-size: 12px; color: #999; margin-top: 4px;">等 ${itemCount} 件美食</div>` : ''}
+                    </div>
+                </div>
+                ${remarkHtml}
+                <div style="padding: 2px 12px; border-top: 1px solid #f5f5f5; text-align: right; line-height: 1;">
+                     <span style="font-size: 12px; color: #999;">正在配送中</span>
+                </div>
+            </div>
+        `;
+    } else if (type === 'order_progress') {
+        extraClass = 'order-progress-msg';
+        let progressData = {};
+        try {
+            progressData = typeof text === 'string' ? JSON.parse(text) : text;
+        } catch(e) {}
+        
+        const title = progressData.title || '商品订单';
+        const status = progressData.status || '待发货';
+        const eta = progressData.eta || '计算中';
+        
+        // Determine progress state
+        let step = 1;
+        if (status === '已发货') step = 2;
+        if (status === '已完成') step = 3;
+        
+        contentHtml = `
+            <div class="order-progress-card" style="background: #fff; border-radius: 12px; overflow: hidden; width: 260px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 15px 15px 1px 15px; margin-top: -40px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;">
+                    <div style="font-size: 14px; font-weight: bold; color: #333;">${title}</div>
+                    <div style="font-size: 12px; color: #007AFF;">${status}</div>
+                </div>
+                
+                <div style="position: relative; height: 35px; display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 5px;">
+                    <div style="position: absolute; top: 5px; left: 5px; right: 5px; height: 2px; background: #f0f0f0; z-index: 0;"></div>
+                    <div style="position: absolute; top: 5px; left: 5px; height: 2px; background: #000; z-index: 0; width: ${step === 1 ? '0%' : (step === 2 ? '50%' : '100%')}; transition: width 0.3s;"></div>
+                    
+                    <div style="z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${step >= 1 ? '#000' : '#fff'}; border: 2px solid ${step >= 1 ? '#000' : '#ddd'}; box-sizing: border-box;"></div>
+                        <div style="font-size: 10px; color: ${step >= 1 ? '#333' : '#999'};">下单</div>
+                    </div>
+                    <div style="z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${step >= 2 ? '#000' : '#fff'}; border: 2px solid ${step >= 2 ? '#000' : '#ddd'}; box-sizing: border-box;"></div>
+                        <div style="font-size: 10px; color: ${step >= 2 ? '#333' : '#999'};">发货</div>
+                    </div>
+                    <div style="z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${step >= 3 ? '#000' : '#fff'}; border: 2px solid ${step >= 3 ? '#000' : '#ddd'}; box-sizing: border-box;"></div>
+                        <div style="font-size: 10px; color: ${step >= 3 ? '#333' : '#999'};">送达</div>
+                    </div>
+                </div>
+                
+                <div style="font-size: 11px; color: #999; text-align: right; margin-top: 5px;">
+                    ${step === 3 ? '订单已完成' : `预计送达 ${eta}`}
+                </div>
+            </div>
+        `;
+    } else if (type === 'pay_request') {
+
+        extraClass = 'pay-request-msg';
+        let payData = {};
+        try {
+            payData = typeof text === 'string' ? JSON.parse(text) : text;
+        } catch(e) {}
+        
+        const itemCount = payData.items ? payData.items.length : 0;
+        const firstItem = itemCount > 0 ? payData.items[0] : { title: '商品', image: '' };
+        const total = payData.total || '0.00';
+        const isPaid = payData.status === 'paid';
+        
+        contentHtml = `
+            <div class="pay-request-card" style="background: #fff; border-radius: 12px; overflow: hidden; width: 230px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: -40px; display: flex; flex-direction: column;">
+                <div style="background: #333333; padding: 8px 12px; color: #fff; font-size: 14px; font-weight: bold; display: flex; align-items: center; justify-content: space-between;">
+                    <span><i class="fas fa-hand-holding-usd" style="margin-right: 6px;"></i>代付请求</span>
+                    <span style="font-size: 16px;">¥${total}</span>
+                </div>
+                <div style="padding: 5px 10px 2px 10px; display: flex; gap: 10px;">
+                    <div style="width: 60px; height: 60px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background-color: #f0f0f0;">
+                        <img src="${firstItem.image || ''}" style="width: 100%; height: 100%; object-fit: cover;">
+                    </div>
+                    <div style="flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: center;">
+                        <div style="font-size: 13px; color: #333; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">${firstItem.title}</div>
+                        ${firstItem.selectedSpec ? `<div style="font-size: 11px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${firstItem.selectedSpec}</div>` : ''}
+                        ${itemCount > 1 ? `<div style="font-size: 12px; color: #999; margin-top: 4px;">等 ${itemCount} 件商品</div>` : ''}
+                    </div>
+                </div>
+                <div style="padding: 2px 12px; border-top: 1px solid #f5f5f5; text-align: right; line-height: 1;">
+                     ${isPaid ? 
+                       '<span style="font-size: 12px; color: #999; border: 1px solid #ddd; padding: 2px 8px; border-radius: 10px; background: #f5f5f5;">已付款</span>' : 
+                       '<span style="font-size: 12px; color: #FF5000; border: 1px solid #FF5000; padding: 2px 8px; border-radius: 10px;">去支付</span>'}
+                </div>
+            </div>
+        `;
+    } else if (type === 'product_share') {
+        extraClass = 'product-share-msg';
+        let productData = {};
+        try {
+            productData = typeof text === 'string' ? JSON.parse(text) : text;
+        } catch(e) {}
+        
+        contentHtml = `
+            <div class="product-share-card" style="background: #fff; border-radius: 12px; overflow: hidden; width: 230px; height: 115px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: -40px; display: flex; flex-direction: column;">
+                <div style="display: flex; padding: 10px; gap: 8px; flex: 1; overflow: hidden;">
+                    <div style="width: 60px; height: 60px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background-color: #f0f0f0;">
+                        <img src="${productData.image || ''}" style="width: 100%; height: 100%; object-fit: cover;">
+                    </div>
+                    <div style="flex: 1; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden;">
+                        <div style="font-size: 13px; color: #333; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.3;">${productData.title || '商品'}</div>
+                        <div style="font-size: 14px; color: #FF5000; font-weight: bold;">¥${productData.price || '0.00'}</div>
+                    </div>
+                </div>
+                <div style="padding: 0 10px 0 10px; height: 26px; font-size: 10px; color: #999; border-top: 1px solid #f5f5f5; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;">
+                    <div style="display: flex; align-items: center;">
+                        <i class="fas fa-shopping-bag" style="color: #FF5000; margin-right: 4px;"></i>
+                        <span>${productData.shop_name || '闲鱼'}</span>
+                    </div>
+                    <i class="fas fa-chevron-right" style="font-size: 10px;"></i>
                 </div>
             </div>
         `;
@@ -2174,6 +2410,7 @@ function handleQuote(msgData) {
     if (msgData.type === 'image') previewText = '[图片]';
     else if (msgData.type === 'sticker') previewText = '[表情包]';
     else if (msgData.type === 'transfer') previewText = '[转账]';
+    else if (msgData.type === 'pay_request') previewText = '[代付请求]';
     
     document.getElementById('reply-text').textContent = previewText;
     replyBar.classList.remove('hidden');
@@ -2246,11 +2483,59 @@ function parseMixedAiResponse(content) {
         }
     };
 
+    // Helper to extract JSON objects from text using brace counting
+    const extractJsonFromText = (text) => {
+        const found = [];
+        let braceCount = 0;
+        let inString = false;
+        let escape = false;
+        let jsonStart = -1;
+        
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (char === '\\') {
+                escape = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = !inString;
+                continue;
+            }
+            
+            if (!inString) {
+                if (char === '{') {
+                    if (braceCount === 0) jsonStart = i;
+                    braceCount++;
+                } else if (char === '}') {
+                    braceCount--;
+                    if (braceCount === 0 && jsonStart !== -1) {
+                        const jsonStr = text.substring(jsonStart, i + 1);
+                        try {
+                            const obj = JSON.parse(jsonStr);
+                            found.push(obj);
+                            jsonStart = -1;
+                        } catch (e) {
+                            // Ignore invalid JSON
+                            console.warn('Failed to parse candidate JSON:', jsonStr.substring(0, 50));
+                        }
+                    } else if (braceCount < 0) {
+                        braceCount = 0;
+                        jsonStart = -1;
+                    }
+                }
+            }
+        }
+        return found;
+    };
+
     // Strategy 1: Attempt to parse the whole content (or markdown block)
     let cleanContent = content.trim();
-    // Remove markdown code blocks if present
     if (cleanContent.includes('```')) {
-        // Try to extract content inside ```json ... ``` or just ``` ... ```
         const match = cleanContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
         if (match) {
             cleanContent = match[1].trim();
@@ -2258,80 +2543,57 @@ function parseMixedAiResponse(content) {
     }
 
     let parsed = tryParse(cleanContent);
-    if (parsed && Array.isArray(parsed)) {
-        parsed.forEach(processItem);
+    if (parsed) {
+        if (Array.isArray(parsed)) parsed.forEach(processItem);
+        else processItem(parsed);
         return results;
     }
 
-    // Strategy 2: Forced Regex Extraction
-    // Look for the outermost square brackets [ ... ] that might contain the array
-    // This handles cases where there is extra text before or after, or the JSON is messy
+    // Strategy 2: Forced Regex Extraction for Arrays
     const jsonArrayRegex = /\[\s*\{[\s\S]*\}\s*\]/g;
     let match;
-    let foundJson = false;
+    let foundArray = false;
     
-    // We iterate in case there are multiple JSON blocks (though usually one)
     while ((match = jsonArrayRegex.exec(content)) !== null) {
         const potentialJson = match[0];
         parsed = tryParse(potentialJson);
         if (parsed && Array.isArray(parsed)) {
             parsed.forEach(processItem);
-            foundJson = true;
+            foundArray = true;
         }
     }
+    if (foundArray) return results;
 
-    if (foundJson) return results;
-
-    // Strategy 3: Line-by-line fallback (for streaming-like or broken multi-line structures)
-    const lines = content.split('\n');
-    let buffer = '';
+    // Strategy 3: Regex Split + JSON Filter (Targeted for "merged messages")
+    // Split by pattern "} {" or "}, {" to handle concatenated JSON objects
+    // Use regex to insert a unique delimiter
+    const delimiter = "___SPLIT___";
+    const splitRegex = /(\})\s*,?\s*(\{)/g;
+    const splitContent = cleanContent.replace(splitRegex, `$1${delimiter}$2`);
+    const parts = splitContent.split(delimiter);
     
-    for (let i = 0; i < lines.length; i++) {
-        let line = lines[i].trim();
-        if (!line) continue;
+    let foundAnyJson = false;
 
-        // Try parsing current line
-        parsed = tryParse(line);
-        
-        if (!parsed) {
-            if (buffer) {
-                let combined = buffer + line;
-                parsed = tryParse(combined);
-                if (parsed) {
-                    buffer = ''; 
-                } else {
-                    buffer += line; 
-                    continue; 
-                }
-            } else {
-                // Start buffering if it looks like start of JSON
-                if (line.startsWith('{') || line.startsWith('[')) {
-                    buffer = line;
-                    continue;
-                }
-                // Otherwise treat as plain text
-                results.push({ type: '消息', content: line });
-                continue;
-            }
-        }
+    for (const part of parts) {
+        const p = part.trim();
+        if (!p) continue;
 
-        if (parsed) {
-            if (Array.isArray(parsed)) {
-                parsed.forEach(processItem);
-            } else {
-                processItem(parsed);
-            }
-        }
-    }
-
-    // Process remaining buffer
-    if (buffer) {
-        parsed = tryParse(buffer);
+        // Try parsing the chunk directly
+        parsed = tryParse(p);
         if (parsed) {
             if (Array.isArray(parsed)) parsed.forEach(processItem);
             else processItem(parsed);
+            foundAnyJson = true;
         } else {
-            results.push({ type: '消息', content: buffer });
+            // Fallback: Extract JSON objects from this chunk
+            const extracted = extractJsonFromText(p);
+            if (extracted.length > 0) {
+                extracted.forEach(processItem);
+                foundAnyJson = true;
+            } else {
+                // If no JSON found, treat as text
+                results.push({ type: '消息', content: p });
+            }
         }
     }
 
@@ -2354,14 +2616,13 @@ function forceSplitMixedContent(content) {
     while ((match = regex.exec(processed)) !== null) {
         // 1. 捕获当前匹配项之前的文本
         const preText = processed.substring(lastIndex, match.index); // 不trim以保留格式
-        if (preText) { // 只要不是空字符串
-             // 如果是纯空白，可能需要保留（如换行），但通常 trim 后判断
-             if (preText.trim()) {
-                 results.push({ type: '消息', content: preText });
-             } else if (preText.includes('\n')) {
-                 // 保留换行
-                 results.push({ type: '消息', content: preText });
-             }
+        if (preText) { 
+             const parts = preText.split('\n');
+             parts.forEach(p => {
+                 if (p.trim()) {
+                     results.push({ type: '消息', content: p.trim() });
+                 }
+             });
         }
 
         // 2. 添加当前匹配项
@@ -2386,7 +2647,12 @@ function forceSplitMixedContent(content) {
     // 3. 捕获剩余的文本
     const postText = processed.substring(lastIndex);
     if (postText && postText.trim()) {
-        results.push({ type: '消息', content: postText });
+        const parts = postText.split('\n');
+        parts.forEach(p => {
+            if (p.trim()) {
+                results.push({ type: '消息', content: p.trim() });
+            }
+        });
     }
 
     return results.length > 0 ? results : [{ type: '消息', content: content }];
@@ -2397,22 +2663,23 @@ function parseMixedContent(content) {
     return forceSplitMixedContent(content);
 }
 
-async function generateAiReply(instruction = null) {
-    if (!window.iphoneSimState.currentChatContactId) return;
+async function generateAiReply(instruction = null, targetContactId = null) {
+    const contactId = targetContactId || window.iphoneSimState.currentChatContactId;
+    if (!contactId) return;
     
-    const contact = window.iphoneSimState.contacts.find(c => c.id === window.iphoneSimState.currentChatContactId);
+    const contact = window.iphoneSimState.contacts.find(c => c.id === contactId);
     if (!contact) return;
 
     const settings = window.iphoneSimState.aiSettings.url ? window.iphoneSimState.aiSettings : window.iphoneSimState.aiSettings2;
     if (!settings.url || !settings.key) {
-        alert('请先在设置中配置AI API');
+        if (!targetContactId) alert('请先在设置中配置AI API');
         return;
     }
 
-    const history = window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId] || [];
+    const history = window.iphoneSimState.chatHistory[contactId] || [];
     
     // Check for Truth or Dare triggers
-    if (window.currentMiniGame === 'truth_dare') {
+    if (!targetContactId && window.currentMiniGame === 'truth_dare') {
         const modal = document.getElementById('mini-game-modal');
         if (modal && !modal.classList.contains('hidden')) {
             const lastMsg = history[history.length - 1];
@@ -2501,16 +2768,78 @@ async function generateAiReply(instruction = null) {
         }
     }
 
+    let userPerceptionContext = '';
+    if (contact.userPerception && contact.userPerception.length > 0) {
+        userPerceptionContext = '\n【关于用户的认知】\n';
+        contact.userPerception.forEach(p => {
+            userPerceptionContext += `- ${p}\n`;
+        });
+    }
+
     let memoryContext = '';
-    if (contact.memorySendLimit && contact.memorySendLimit > 0) {
-        const contactMemories = window.iphoneSimState.memories.filter(m => m.contactId === contact.id);
-        if (contactMemories.length > 0) {
-            const recentMemories = contactMemories.sort((a, b) => b.time - a.time).slice(0, contact.memorySendLimit);
-            recentMemories.reverse();
+    // 增强记忆读取逻辑：结合最近记忆和相关性记忆 (Simple RAG)
+    const contactMemories = window.iphoneSimState.memories.filter(m => m.contactId === contact.id);
+    
+    if (contactMemories.length > 0) {
+        // 1. 获取限制，默认为 5 条
+        const limit = contact.memorySendLimit && contact.memorySendLimit > 0 ? contact.memorySendLimit : 5;
+        
+        // 2. 按时间倒序排序 (最新的在前)
+        const sortedMemories = contactMemories.sort((a, b) => b.time - a.time);
+        
+        // 3. 总是保留最新的几条记忆 (保持短期连贯性)
+        const recentCount = Math.min(3, limit);
+        const recentMemories = sortedMemories.slice(0, recentCount);
+        
+        // 4. 对剩余记忆进行关键词匹配 (Contextual Retrieval)
+        // 提取当前对话上下文中的关键词 (简单的基于最近20条消息的全文检索)
+        const remainingMemories = sortedMemories.slice(recentCount);
+        const relevantMemories = [];
+        
+        if (remainingMemories.length > 0) {
+            const contextText = history.slice(-20).map(m => m.content).join(' ').toLowerCase();
             
-            memoryContext += '\n【重要记忆】\n';
-            recentMemories.forEach(m => {
-                memoryContext += `- ${m.content}\n`;
+            if (contextText) {
+                const scored = remainingMemories.map(mem => {
+                    let score = 0;
+                    const content = mem.content.toLowerCase();
+                    
+                    // 简单的双字匹配评分 (Bigram matching score)
+                    // 对于中文环境，这比单词匹配更鲁棒
+                    if (content.length > 1 && contextText.length > 1) {
+                        for (let i = 0; i < content.length - 1; i++) {
+                            const bigram = content.substr(i, 2);
+                            // 排除常见标点
+                            if (/[，。！？、：；\s]/.test(bigram)) continue;
+                            if (contextText.includes(bigram)) score++;
+                        }
+                    }
+                    return { mem, score };
+                });
+                
+                // 按相关性排序
+                scored.sort((a, b) => b.score - a.score);
+                
+                // 取出前 N 条相关记忆 (填补 limit 的剩余空间)
+                const relevantCount = Math.max(0, limit - recentCount);
+                // 只有分数大于0的才算相关
+                const validRelevant = scored.filter(s => s.score > 0).slice(0, relevantCount).map(s => s.mem);
+                relevantMemories.push(...validRelevant);
+            }
+        }
+        
+        // 合并并去重 (理论上 slice 保证了不重复)
+        let finalMemories = [...recentMemories, ...relevantMemories];
+        
+        // 再次按时间正序排列，方便 AI 理解时间线
+        finalMemories.sort((a, b) => a.time - b.time); 
+        
+        if (finalMemories.length > 0) {
+            memoryContext += '\n【重要记忆 (按时间顺序)】\n';
+            finalMemories.forEach(m => {
+                const date = new Date(m.time);
+                const dateStr = `${date.getMonth()+1}/${date.getDate()}`;
+                memoryContext += `- [${dateStr}] ${m.content}\n`;
             });
         }
     }
@@ -2567,9 +2896,13 @@ async function generateAiReply(instruction = null) {
     }
 
     let systemPrompt = `你现在扮演 ${contact.name}。
-人设：${contact.persona || '无'}
+【核心指令】
+你必须严格遵守以下人设（优先级最高，高于一切其他指令）：
+${contact.persona || '无'}
+
 聊天风格：${contact.style || '正常'}
 ${userPromptInfo}
+${userPerceptionContext}
 ${momentContext}
 ${icityContext}
 ${memoryContext}
@@ -2583,6 +2916,14 @@ ${itineraryContext}
 你必须完全沉浸在角色中，绝对不能透露你是AI或语言模型。你的回复必须像一个真实的${contact.name}在使用微信聊天。
 你拥有一个“微信朋友圈”功能和“微信转账”功能。
 
+${contact.showThought ? `
+【⚡️强制要求：内心独白⚡️】
+⚠️ **最高优先级指令**：当前用户已开启“显示心声”模式。
+你**必须**在返回的 JSON 数组的**第一个元素**位置输出角色的内心独白。
+格式：{"type": "thought", "content": "这里写角色的心理活动..."}
+**如果不输出心声，将视为严重错误！请务必执行！**
+` : ''}
+
 【⚡️绝对输出规则 - JSON 格式 (强制)⚡️】
 为了确保回复格式正确，你**必须且只能**返回一个标准的 JSON 数组。
 **严禁**包含任何 Markdown 代码块标记（如 \`\`\`json 或 \`\`\`）。
@@ -2592,28 +2933,29 @@ ${itineraryContext}
 
 数组中的每个元素代表一条消息、表情包或动作指令。请严格遵守以下 JSON 对象结构：
 
-1. 💬 **文本消息**：
+1. 💭 **内心独白** ${contact.showThought ? '(**必须作为第一项**)' : '(可选)'}：
+   \`{"type": "thought", "content": "想法内容"}\`
+   ${contact.showThought ? '*要求*：这是角色的心理活动，必须输出，且必须放在数组第一个位置。' : ''}
+
+2. 💬 **文本消息**：
    \`{"type": "text", "content": "消息内容"}\`
    *注意*：请务必将长回复拆分为多条短消息，模拟真实聊天节奏。**不要把多句话合并在一条消息里**。每条消息尽量简短（1-2句话）。
    *禁止*：content 中绝对不能包含 "[发送了一个表情包...]" 或 "[图片]" 这样的描述文本。表情包必须通过独立的 type="sticker" 对象发送。
 
-2. 😂 **表情包**（如果有）：
+3. 😂 **表情包**（如果有）：
    \`{"type": "sticker", "content": "表情包名称"}\`
    *注意*：只能使用下方【可用表情包列表】中存在的名称。
    *禁止*：不要在 content 中写 "[发送了一个表情包...]"，直接写表情包名称即可。
 
-3. 🖼️ **图片**：
+4. 🖼️ **图片**：
    \`{"type": "image", "content": "图片描述"}\`
 
-4. 🎤 **语音**：
+5. 🎤 **语音**：
    \`{"type": "voice", "duration": 秒数, "content": "语音文本"}\`
 
-5. ⚡️ **动作指令**：
+6. ⚡️ **动作指令**：
    \`{"type": "action", "command": "指令名", "payload": "参数"}\`
    *说明*：原本的 \`ACTION:\` 指令请封装在此结构中。例如 \`ACTION: POST_MOMENT: 内容\` 变为 \`{"type": "action", "command": "POST_MOMENT", "payload": "内容"}\`。
-
-6. 💭 **内心独白**（可选）：
-   \`{"type": "thought", "content": "想法内容"}\`
 
 **示例回复：**
 [
@@ -2638,6 +2980,9 @@ ${itineraryContext}
 - 转账 -> command: "TRANSFER", payload: "金额 备注" (例如 "88.88 节日快乐")
 - 接收转账 -> command: "ACCEPT_TRANSFER", payload: "ID"
 - 退回转账 -> command: "RETURN_TRANSFER", payload: "ID"
+- 支付代付请求 -> command: "PAY_FOR_REQUEST", payload: "requestId" (当用户发送了代付请求时，你可以选择帮他支付。requestId在代付消息的JSON中)
+- 送礼物给用户 -> command: "SEND_GIFT", payload: "物品名称 | 价格 | 备注" (例如 "一束鲜花 | 52.0 | 节日快乐")
+- 点外卖给用户 -> command: "SEND_DELIVERY", payload: "餐品名称 | 价格 | 备注" (例如 "炸鸡啤酒 | 35.0 | 趁热吃")
 - 引用回复 -> command: "QUOTE_MESSAGE", payload: "消息内容摘要"
 - 更改资料 -> 
   - command: "UPDATE_NAME", payload: "新网名"
@@ -2675,7 +3020,7 @@ ${contact.showThought ? '- **强制执行**：请务必输出角色的【内心�
 5. 发送图片时，请提供详细的画面描述。
 5. 一次回复中最多只能发起一笔转账。
 6. 你有权限更改自己的资料卡信息（网名、微信号、签名），当用户要求或你自己想改时可以使用。
-7. **内心独白**是角色的心理活动，用户可见（如果开启了显示）。${contact.showThought ? '当前已开启显示，请务必输出。' : ''}
+7. **内心独白**是角色的心理活动，用户可见（如果开启了显示）。${contact.showThought ? '当前已开启显示，请务必输出，且作为第一条。' : ''}
 
 请回复对方的消息。`;
 
@@ -2899,6 +3244,13 @@ ${contact.showThought ? '- **强制执行**：请务必输出角色的【内心�
                     giftData = { title: '礼物', price: '0' };
                 }
                 return { role: h.role, content: `[送出礼物：${giftData.title}，价值：${giftData.price}元] (这是我在闲鱼上看到你收藏的商品，特意买来送给你的)` };
+            } else if (h.type === 'shopping_gift') {
+                let giftData = {};
+                try {
+                    giftData = typeof content === 'string' ? JSON.parse(content) : content;
+                } catch(e) {}
+                const items = giftData.items ? giftData.items.map(i => i.title).join(', ') : '礼物';
+                return { role: h.role, content: `[送出礼物：${items}，总价值：${giftData.total}元] (这是我在购物APP购买并送给你的)` };
             } else if (h.type === 'icity_card') {
                 let cardData = {};
                 try {
@@ -3082,6 +3434,9 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
         const transferRegex = /ACTION:\s*TRANSFER:\s*(\d+(?:\.\d{1,2})?)\s*(.*?)(?:\n|$)/;
         const acceptTransferRegex = /ACTION:\s*ACCEPT_TRANSFER:\s*(\d+)(?:\n|$)/;
         const returnTransferRegex = /ACTION:\s*RETURN_TRANSFER:\s*(\d+)(?:\n|$)/;
+        const payForRequestRegex = /ACTION:\s*PAY_FOR_REQUEST:\s*(.*?)(?:\n|$)/;
+        const sendGiftRegex = /ACTION:\s*SEND_GIFT:\s*(.*?)(?:\n|$)/;
+        const sendDeliveryRegex = /ACTION:\s*SEND_DELIVERY:\s*(.*?)(?:\n|$)/;
         const updateNameRegex = /ACTION:\s*UPDATE_NAME:\s*(.*?)(?:\n|$)/;
         const updateWxidRegex = /ACTION:\s*UPDATE_WXID:\s*(.*?)(?:\n|$)/;
         const updateSignatureRegex = /ACTION:\s*UPDATE_SIGNATURE:\s*(.*?)(?:\n|$)/;
@@ -3430,6 +3785,116 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
                 }
                 processedSegment = processedSegment.replace(returnTransferMatch[0], '');
             }
+
+            let payForRequestMatch;
+            while ((payForRequestMatch = processedSegment.match(payForRequestRegex)) !== null) {
+                const requestId = payForRequestMatch[1].trim();
+                if (requestId) {
+                    const history = window.iphoneSimState.chatHistory[contact.id] || [];
+                    let targetMsg = null;
+                    for (let j = history.length - 1; j >= 0; j--) {
+                        const msg = history[j];
+                        if (msg.type === 'pay_request') {
+                            let data = null;
+                            try { data = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content; } catch(e){}
+                            if (data && data.id === requestId) {
+                                targetMsg = msg;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (targetMsg) {
+                        setTimeout(() => {
+                            let data = typeof targetMsg.content === 'string' ? JSON.parse(targetMsg.content) : targetMsg.content;
+                            if (data.status !== 'paid') {
+                                data.status = 'paid';
+                                targetMsg.content = JSON.stringify(data);
+                                if (window.handlePayForRequest) {
+                                    window.handlePayForRequest(requestId, contact.name, data);
+                                }
+                                saveConfig();
+                                renderChatHistory(contact.id, true);
+                                sendMessage('[系统消息]: 对方已帮你付款', false, 'text');
+                            }
+                        }, 1500);
+                    }
+                }
+                processedSegment = processedSegment.replace(payForRequestMatch[0], '');
+            }
+
+            let sendGiftMatch;
+            while ((sendGiftMatch = processedSegment.match(sendGiftRegex)) !== null) {
+                const payload = sendGiftMatch[1].trim();
+                const parts = payload.split('|').map(s => s.trim());
+                if (parts.length >= 2) {
+                    const title = parts[0];
+                    const price = parseFloat(parts[1]) || 0;
+                    const remark = parts[2] || '';
+                    
+                    // 生成占位图
+                    let imgUrl = '';
+                    if (typeof generatePlaceholderImage === 'function') {
+                        let bgColor = '#FF9500';
+                        if (window.getRandomPastelColor) {
+                            bgColor = window.getRandomPastelColor();
+                        }
+                        imgUrl = generatePlaceholderImage(300, 300, title, bgColor);
+                    } else {
+                        imgUrl = 'https://placehold.co/300x300/FF9500/ffffff?text=' + encodeURIComponent(title);
+                    }
+
+                    const giftData = {
+                        items: [{
+                            title: title,
+                            price: price,
+                            image: imgUrl,
+                            isDelivery: false
+                        }],
+                        total: price.toFixed(2),
+                        remark: remark
+                    };
+                    
+                    setTimeout(() => {
+                        sendMessage(JSON.stringify(giftData), false, 'shopping_gift');
+                    }, 1000);
+                }
+                processedSegment = processedSegment.replace(sendGiftMatch[0], '');
+            }
+
+            let sendDeliveryMatch;
+            while ((sendDeliveryMatch = processedSegment.match(sendDeliveryRegex)) !== null) {
+                const payload = sendDeliveryMatch[1].trim();
+                const parts = payload.split('|').map(s => s.trim());
+                if (parts.length >= 2) {
+                    const title = parts[0];
+                    const price = parseFloat(parts[1]) || 0;
+                    const remark = parts[2] || '';
+                    
+                    let imgUrl = '';
+                    if (typeof generatePlaceholderImage === 'function') {
+                        imgUrl = generatePlaceholderImage(300, 300, title, '#007AFF');
+                    } else {
+                        imgUrl = 'https://placehold.co/300x300/007AFF/ffffff?text=' + encodeURIComponent(title);
+                    }
+
+                    const deliveryData = {
+                        items: [{
+                            title: title,
+                            price: price,
+                            image: imgUrl,
+                            isDelivery: true
+                        }],
+                        total: price.toFixed(2),
+                        remark: remark
+                    };
+                    
+                    setTimeout(() => {
+                        sendMessage(JSON.stringify(deliveryData), false, 'delivery_share');
+                    }, 1000);
+                }
+                processedSegment = processedSegment.replace(sendDeliveryMatch[0], '');
+            }
         }
 
         if (thoughtContent && contact.showThought) {
@@ -3448,9 +3913,21 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
             const shouldShowInChat = isChatOpen && isSameContact;
 
             if (shouldShowInChat) {
+                // 如果用户在聊天界面但页面被隐藏/最小化，仍然发送系统通知
+                if (document.hidden) {
+                    let notifContent = msg.content;
+                    if (msg.type === '表情包') notifContent = '[表情包]';
+                    else if (msg.type === '图片') notifContent = '[图片]';
+                    else if (msg.type === '语音') notifContent = '[语音]';
+                    else if (msg.type === 'virtual_image') notifContent = '[图片]';
+                    else if (msg.type === 'sticker') notifContent = '[表情包]';
+                    
+                    sendSystemNotification(contact, notifContent);
+                }
+
                 // 用户在聊天界面，使用打字机效果或直接发送
                 if (msg.type === '消息') {
-                    await typewriterEffect(msg.content, contact.avatar, currentThought, currentReplyTo, 'text');
+                    await typewriterEffect(msg.content, contact.avatar, currentThought, currentReplyTo, 'text', contactId);
                 } else if (msg.type === '表情包') {
                     // 尝试查找表情包 URL
                     let stickerUrl = null;
@@ -3469,10 +3946,10 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
                         }
                     }
                     if (stickerUrl) {
-                        sendMessage(stickerUrl, false, 'sticker', msg.content);
+                        sendMessage(stickerUrl, false, 'sticker', msg.content, contactId);
                     } else {
                         // 找不到表情包，降级为文本
-                        await typewriterEffect(`[表情包: ${msg.content}]`, contact.avatar, currentThought, currentReplyTo, 'text');
+                        await typewriterEffect(`[表情包: ${msg.content}]`, contact.avatar, currentThought, currentReplyTo, 'text', contactId);
                     }
                 } else if (msg.type === '语音') {
                     const parts = msg.content.match(/(\d+)\s+(.*)/);
@@ -3487,12 +3964,12 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
                         text: text,
                         isReal: false
                     };
-                    sendMessage(JSON.stringify(voiceData), false, 'voice');
+                    sendMessage(JSON.stringify(voiceData), false, 'voice', null, contactId);
                 } else if (msg.type === '图片') {
                     const defaultImageUrl = window.iphoneSimState.defaultVirtualImageUrl || 'https://placehold.co/600x400/png?text=Photo';
-                    sendMessage(defaultImageUrl, false, 'virtual_image', msg.content);
+                    sendMessage(defaultImageUrl, false, 'virtual_image', msg.content, contactId);
                 } else if (msg.type === '旁白') {
-                    await typewriterEffect(msg.content, contact.avatar, null, null, 'description');
+                    await typewriterEffect(msg.content, contact.avatar, null, null, 'description', contactId);
                 }
             } else {
                 // 用户不在聊天界面，后台保存并弹窗
@@ -3606,18 +4083,9 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
         if (imageToSend) {
             if (imageToSend.type === 'virtual_image') {
                 const defaultImageUrl = window.iphoneSimState.defaultVirtualImageUrl || 'https://placehold.co/600x400/png?text=Photo';
-                sendMessage(defaultImageUrl, false, 'virtual_image', imageToSend.content);
+                sendMessage(defaultImageUrl, false, 'virtual_image', imageToSend.content, contactId);
             } else if (imageToSend.type === 'sticker') {
-                sendMessage(imageToSend.content, false, 'sticker', imageToSend.desc);
-            }
-        }
-
-        if (imageToSend) {
-            if (imageToSend.type === 'virtual_image') {
-                const defaultImageUrl = window.iphoneSimState.defaultVirtualImageUrl || 'https://placehold.co/600x400/png?text=Photo';
-                sendMessage(defaultImageUrl, false, 'virtual_image', imageToSend.content);
-            } else if (imageToSend.type === 'sticker') {
-                sendMessage(imageToSend.content, false, 'sticker', imageToSend.desc);
+                sendMessage(imageToSend.content, false, 'sticker', imageToSend.desc, contactId);
             }
         }
 
@@ -3637,10 +4105,16 @@ const icityDiaryRegex = /ACTION:\s*POST_ICITY_DIARY:\s*(.*?)(?:\n|$)/;
     }
 }
 
-function typewriterEffect(text, avatarUrl, thought = null, replyTo = null, type = 'text') {
+function typewriterEffect(text, avatarUrl, thought = null, replyTo = null, type = 'text', targetContactId = null) {
     return new Promise(resolve => {
-        if (!window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId]) {
-            window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId] = [];
+        const contactId = targetContactId || window.iphoneSimState.currentChatContactId;
+        if (!contactId) {
+            resolve();
+            return;
+        }
+
+        if (!window.iphoneSimState.chatHistory[contactId]) {
+            window.iphoneSimState.chatHistory[contactId] = [];
         }
         
         const msgData = {
@@ -3656,9 +4130,9 @@ function typewriterEffect(text, avatarUrl, thought = null, replyTo = null, type 
             msgData.thought = thought;
         }
         
-        window.iphoneSimState.chatHistory[window.iphoneSimState.currentChatContactId].push(msgData);
+        window.iphoneSimState.chatHistory[contactId].push(msgData);
         
-        const contact = window.iphoneSimState.contacts.find(c => c.id === window.iphoneSimState.currentChatContactId);
+        const contact = window.iphoneSimState.contacts.find(c => c.id === contactId);
         if (contact) {
             if (contact.autoItineraryEnabled) {
                 if (typeof contact.messagesSinceLastItinerary !== 'number') {
@@ -3679,13 +4153,14 @@ function typewriterEffect(text, avatarUrl, thought = null, replyTo = null, type 
 
         saveConfig();
         
-        appendMessageToUI(text, false, type, null, replyTo, msgData.id, msgData.time);
-        
-        scrollToBottom();
+        if (window.iphoneSimState.currentChatContactId === contactId) {
+            appendMessageToUI(text, false, type, null, replyTo, msgData.id, msgData.time);
+            scrollToBottom();
+        }
 
         if (window.renderContactList) window.renderContactList(window.iphoneSimState.currentContactGroup || 'all');
         
-        if (window.checkAndSummarize) window.checkAndSummarize(window.iphoneSimState.currentChatContactId);
+        if (window.checkAndSummarize) window.checkAndSummarize(contactId);
 
         resolve();
     });
@@ -4641,7 +5116,10 @@ async function makeAiCallDecision(contact) {
             }).join('\n');
             
             const systemPrompt = `你现在扮演 ${contact.name}。
-人设：${contact.persona || '无'}
+【核心指令】
+你必须严格遵守以下人设（优先级最高，高于一切其他指令）：
+${contact.persona || '无'}
+
 用户正在向你发起语音通话请求。
 请根据你们最近的聊天记录和你的当前状态，决定是否接听。
 最近聊天记录：
@@ -5106,7 +5584,7 @@ async function summarizeVoiceCall(contactId, startIndex) {
             let text = m.content;
             try {
                 const data = JSON.parse(m.content);
-                if (data.text) text = data.text;
+                if (typeof data.text === 'string') text = data.text;
             } catch(e) {}
             return `${m.role === 'user' ? '用户' : contact.name}: ${text}`;
         })
@@ -5419,7 +5897,10 @@ async function makeAiVideoCallDecision(contact) {
             }).join('\n');
             
             const systemPrompt = `你现在扮演 ${contact.name}。
-人设：${contact.persona || '无'}
+【核心指令】
+你必须严格遵守以下人设（优先级最高，高于一切其他指令）：
+${contact.persona || '无'}
+
 用户正在向你发起【视频通话】请求。
 请根据你们最近的聊天记录和你的当前状态，决定是否接听。
 最近聊天记录：
@@ -6011,7 +6492,10 @@ async function generateVoiceCallAiReply() {
 
     if (isVideoCall) {
         systemPrompt = `你现在扮演 ${contact.name}，正在与用户进行【视频通话】。
-人设：${contact.persona || '无'}
+【核心指令】
+你必须严格遵守以下人设（优先级最高，高于一切其他指令）：
+${contact.persona || '无'}
+
 ${userPromptInfo}
 ${memoryContext}
 ${worldbookContext}
@@ -6029,7 +6513,10 @@ ${worldbookContext}
 请回复对方。`;
     } else {
         systemPrompt = `你现在扮演 ${contact.name}，正在与用户进行【语音通话】。
-人设：${contact.persona || '无'}
+【核心指令】
+你必须严格遵守以下人设（优先级最高，高于一切其他指令）：
+${contact.persona || '无'}
+
 ${userPromptInfo}
 ${memoryContext}
 ${worldbookContext}
@@ -6190,6 +6677,14 @@ ${worldbookContext}
         if (dialogue.includes('ACTION: HANGUP_CALL')) {
             shouldHangup = true;
             dialogue = dialogue.replace('ACTION: HANGUP_CALL', '').trim();
+        }
+
+        // 防止空回复
+        if (!desc && !dialogue) {
+            console.log('AI generated empty response for video call, skipping message');
+            isProcessingResponse = false;
+            if (statusEl) statusEl.textContent = '通话中';
+            return;
         }
 
         // 显示描述部分
@@ -7731,6 +8226,67 @@ function setupChatListeners() {
     if (saveEditBlockBtn) {
         saveEditBlockBtn.addEventListener('click', handleSaveEditBlock);
     }
+
+    // 系统通知设置
+    const sysNotifToggle = document.getElementById('system-notification-toggle');
+    if (sysNotifToggle) {
+        sysNotifToggle.checked = window.iphoneSimState.enableSystemNotifications || false;
+        
+        sysNotifToggle.addEventListener('change', async (e) => {
+            if (e.target.checked) {
+                if (!("Notification" in window)) {
+                    alert("此浏览器不支持系统通知");
+                    e.target.checked = false;
+                    return;
+                }
+
+                if (Notification.permission === "granted") {
+                    window.iphoneSimState.enableSystemNotifications = true;
+                    saveConfig();
+                    new Notification("通知已开启", { body: "你现在可以接收后台消息通知了" });
+                } else if (Notification.permission !== "denied") {
+                    const permission = await Notification.requestPermission();
+                    if (permission === "granted") {
+                        window.iphoneSimState.enableSystemNotifications = true;
+                        saveConfig();
+                        new Notification("通知已开启", { body: "你现在可以接收后台消息通知了" });
+                    } else {
+                        e.target.checked = false;
+                        alert("需要通知权限才能开启此功能");
+                    }
+                } else {
+                    e.target.checked = false;
+                    alert("通知权限已被拒绝，请在浏览器设置中手动开启");
+                }
+            } else {
+                window.iphoneSimState.enableSystemNotifications = false;
+                saveConfig();
+            }
+        });
+    }
+
+    // 后台音频混音设置
+    const bgAudioToggle = document.getElementById('background-audio-toggle');
+    if (bgAudioToggle) {
+        bgAudioToggle.checked = window.iphoneSimState.enableBackgroundAudio || false;
+        
+        bgAudioToggle.addEventListener('change', (e) => {
+            window.iphoneSimState.enableBackgroundAudio = e.target.checked;
+            saveConfig();
+            
+            if (window.updateAudioSession) {
+                window.updateAudioSession();
+            }
+            
+            if (e.target.checked) {
+                // 尝试请求播放静音音频以激活会话（如果是用户交互触发）
+                // 这在某些浏览器上可能有助于立即生效
+                if (window.iphoneSimState.music && window.iphoneSimState.music.playing) {
+                    // 如果正在播放，不需要做什么，updateAudioSession 会处理 Session 类型
+                }
+            }
+        });
+    }
 }
 
 function updateWechatHeader(tab) {
@@ -8078,7 +8634,66 @@ function getLastAiBlockJson(contactId) {
     return JSON.stringify(jsonOutput, null, 2);
 }
 
+function checkActiveReplies() {
+    if (!window.iphoneSimState || !window.iphoneSimState.contacts) return;
+    
+    const now = Date.now();
+    
+    window.iphoneSimState.contacts.forEach(contact => {
+        if (!contact.activeReplyEnabled) return;
+        
+        const history = window.iphoneSimState.chatHistory[contact.id];
+        if (!history || history.length === 0) return;
+        
+        const lastMsg = history[history.length - 1];
+        const intervalMs = (contact.activeReplyInterval || 60) * 1000;
+        
+        // Ensure we only count messages sent AFTER the feature was enabled
+        if (contact.activeReplyStartTime && lastMsg.time <= contact.activeReplyStartTime) {
+            return;
+        }
+
+        if (contact.lastActiveReplyTriggeredMsgId === lastMsg.id) return;
+        
+        if (now - lastMsg.time > intervalMs) {
+            console.log(`[ActiveReply] Triggering for ${contact.name}`);
+            
+            contact.lastActiveReplyTriggeredMsgId = lastMsg.id;
+            saveConfig();
+            
+            let activeInstruction = "";
+            const timeDiff = now - lastMsg.time;
+            const minutesPassed = Math.floor(timeDiff / 60000);
+            
+            if (lastMsg.role === 'user') {
+                // User sent last message, AI is replying late
+                activeInstruction = `（系统提示：主动发消息模式触发。距离用户上一条消息已过去 ${minutesPassed} 分钟。请回复用户的消息。你可以顺便解释一下为什么回复晚了，或者直接自然地继续话题。）`;
+            } else {
+                // AI sent last message, User didn't reply
+                activeInstruction = `（系统提示：主动发消息模式触发。距离你上一条消息已过去 ${minutesPassed} 分钟，用户一直没有回复。请主动发起一条新消息，可以是对上一条的补充，或者是开启新话题，或者是分享当下的心情/状态。请保持自然，不要暴露你是AI。）`;
+            }
+
+            generateAiReply(activeInstruction, contact.id);
+        }
+    });
+}
+
+window.updateSystemSettingsUi = function() {
+    const sysNotifToggle = document.getElementById('system-notification-toggle');
+    if (sysNotifToggle) {
+        sysNotifToggle.checked = window.iphoneSimState.enableSystemNotifications || false;
+    }
+    
+    const bgAudioToggle = document.getElementById('background-audio-toggle');
+    if (bgAudioToggle) {
+        bgAudioToggle.checked = window.iphoneSimState.enableBackgroundAudio || false;
+    }
+};
+
 // 注册初始化函数
 if (window.appInitFunctions) {
     window.appInitFunctions.push(setupChatListeners);
+    window.appInitFunctions.push(() => {
+        setInterval(checkActiveReplies, 5000);
+    });
 }

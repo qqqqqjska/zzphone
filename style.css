@@ -165,7 +165,7 @@
     border-radius: 12px;
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
     font-size: 14px;
-    z-index: 140; /* 低于子屏幕，高于聊天内容 */
+    z-index: 1010; /* 高于通知横幅，确保不被遮挡 */
     max-width: 80%;
     text-align: center;
     transition: opacity 0.3s ease, transform 0.3s ease;
@@ -3404,6 +3404,21 @@ input:checked + .slider:before {
     border-radius: 0 !important;
     box-shadow: none !important;
     max-width: 100% !important;
+}
+
+/* Product Share Message Style */
+.message-content.product-share-msg {
+    background-color: transparent !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    max-width: 100% !important;
+}
+
+/* 修复用户发送的产品分享卡片样式 */
+.chat-message.user .message-content.product-share-msg {
+    background-color: transparent !important;
+    color: #000 !important;
 }
 
 .message-content.sticker-msg img {

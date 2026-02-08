@@ -112,7 +112,10 @@ const state = {
     selectedStickers: new Set(), // 存储选中的表情包标识 (catId-index)
     replyingToMsg: null, // 当前正在引用的消息 { content, name, type }
     isMultiSelectMode: false,
-    selectedMessages: new Set() // 存储选中的消息ID
+    selectedMessages: new Set(), // 存储选中的消息ID
+    enableSystemNotifications: false, // 系统后台通知开关
+    enableBackgroundAudio: false, // 允许后台音频混音播放
+    shoppingProducts: [] // 购物商品列表
 };
 
 // 暴露 state 给全局
@@ -133,7 +136,7 @@ const knownApps = {
     'shopping-app': { name: '购物', icon: 'fas fa-shopping-bag', color: '#FF9500' },
     'forum-app': { name: '论坛', icon: 'fas fa-comments', color: '#30B0C7' },
     'phone-app': { name: '查手机', icon: 'fas fa-mobile-alt', color: '#34C759' },
-    'message-app': { name: '信息', icon: 'fas fa-envelope', color: '#007AFF' }
+    'icity-app': { name: 'iCity', icon: 'fas fa-city', color: '#000000' }
 };
 
 // 获取查手机功能中，当前显示的"我"的头像
@@ -615,6 +618,41 @@ async function loadConfig() {
     }
 }
 
+// 更新音频会话配置
+window.updateAudioSession = function() {
+    try {
+        if (window.iphoneSimState.enableBackgroundAudio) {
+            // 使用 'play-and-record' 类型并设置 'mix' 选项，这通常允许与后台音频共存
+            // 注意：这需要 HTTPS 环境才能完全生效
+            if (navigator.audioSession) {
+                navigator.audioSession.type = 'play-and-record';
+            }
+            
+            // 尝试使用 Media Session API 保持活跃
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'playing';
+                // 设置元数据有助于某些系统保持后台活跃
+                if (!navigator.mediaSession.metadata && window.iphoneSimState.music) {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: window.iphoneSimState.music.title || 'Background Audio',
+                        artist: window.iphoneSimState.music.artist || 'iPhone Simulator',
+                        artwork: [
+                            { src: window.iphoneSimState.music.cover || 'https://placehold.co/512x512', sizes: '512x512', type: 'image/png' }
+                        ]
+                    });
+                }
+            }
+        } else {
+            // 恢复默认
+            if (navigator.audioSession) {
+                navigator.audioSession.type = 'auto';
+            }
+        }
+    } catch (e) {
+        console.warn('Audio Session configuration failed:', e);
+    }
+};
+
 function handleClearAllData() {
     if (confirm('确定要清空所有数据吗？此操作不可恢复！所有设置、聊天记录、图片等都将丢失。')) {
         localforage.clear().then(() => {
@@ -799,6 +837,9 @@ async function init() {
         console.error('加载配置失败:', e);
     }
 
+    // 初始化购物UI
+    if (window.initShoppingUI) window.initShoppingUI();
+
     // 更新 icity 资料卡
     if (window.renderIcityProfile) window.renderIcityProfile();
     if (window.renderIcityDiaryList) window.renderIcityDiaryList();
@@ -841,6 +882,8 @@ async function init() {
     }
     if (window.updateWhisperUi) updateWhisperUi();
     if (window.updateMinimaxUi) updateMinimaxUi();
+    if (window.updateSystemSettingsUi) updateSystemSettingsUi();
+    if (window.updateAudioSession) window.updateAudioSession();
     if (window.renderContactList) renderContactList();
     if (window.migrateWorldbookData) migrateWorldbookData();
     if (window.renderWorldbookCategoryList) renderWorldbookCategoryList();
